@@ -1,6 +1,6 @@
 {
   "name": "loopback-mixin-mongo-embed",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Rewrites embbedded methods\/routes to use mongos $set, $unset, $push and $pull methods",
   "main": "index.js",
   "scripts": {
