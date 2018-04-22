@@ -1,0 +1,24 @@
+{
+  "name": "loopback-mixin-mongo-embed",
+  "version": "1.0.0",
+  "description": "Rewrites embbedded methods\/routes to use mongos $set, $unset, $push and $pull methods",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "compile": "coffee --bare --no-header --output . --compile src/"
+  },
+  "author": {
+    "name": "Nathan Bolam",
+    "url": "https://github.com/BoLaMN"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BoLaMN/loopback-mixin-mongo-embed"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "async": "^2.6.0",
+    "debug": "^3.1.0",
+    "mongodb": "^3.0.7"
+  }
+}
