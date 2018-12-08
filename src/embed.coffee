@@ -1,33 +1,15 @@
 debug = require('debug') 'loopback:mixin:embed'
 
-{ query } = require './filter'
+HttpError = require 'standard-http-error'
+
+{ singularize } = require 'inflection'
+{ ValidationError } = require 'loopback-datasource-juggler/lib/validations'
 
 async = require 'async'
-mongodb = require 'mongodb'
 
 module.exports = (Model, options) ->
-
-  props = Model.definition.settings.relations
-
-  ObjectID = (id) ->
-    if not id
-      return new mongodb.ObjectID()
-
-    if id instanceof mongodb.ObjectID
-      return id
-
-    if typeof id != 'string'
-      return id
-
-    try
-      if /^[0-9a-fA-F]{24}$/.test(id)
-        return new mongodb.ObjectID(id)
-      else
-        return id
-    catch e
-      return id
-
-    return
+  relations = options.relations
+  props = Model.settings.relations
 
   accepted = [
     '$currentDate'
@@ -46,33 +28,45 @@ module.exports = (Model, options) ->
     '$pull'
     '$pushAll'
     '$push'
+    '$each'
     '$bit'
   ]
+
+  class Errors
+    constructor: ->
+      @codes = {}
+
+    add: (field, message, code = 'invalid') ->
+      @[field] ?= []
+      @[field].push message
+
+      @codes[field] ?= []
+      @codes[field].push code
 
   Model.parseUpdateData = (base, data, operator) ->
     obj = {}
 
-    data = data.toObject?(false) or data 
-    
     for op in accepted when data[op]
-      obj[op] = data[op]
+      if op is '$push' and Array.isArray(data[op]) and data[op].length
+        obj[op] = $each: data[op]
+      else
+        obj[op] = data[op]
+
       delete data[op]
 
-    if Object.keys(data).length > 0
+    if operator is '$push' and Array.isArray(data) and data.length
+      obj[operator] ?= {}
+      obj[operator][base] = $each: data
+    else if Object.keys(data).length > 0
       obj[operator] ?= {}
 
       for own key, val of data when val?
-        if operator in [ '$push', '$pull' ]
-          if base 
-            obj[operator][base] ?= {}
-            obj[operator][base][key] = val
-          else 
-            obj[operator][key] = val
+        if operator in [ '$push', 'pull' ]
+          obj[operator][base] ?= {}
+          obj[operator][base][key] = val
         else
-          if base 
-            obj[operator][base + '.' + key] = val
-          else 
-            obj[operator][key] = val
+          obj[operator][base + key] = val
+
     obj
 
   Model.generateAggregateFilter ?= (key) ->
@@ -91,233 +85,8 @@ module.exports = (Model, options) ->
       }
     ]
 
-  overWriteEmbedModelFunctions = (type, key) ->
-    model = Model.app.models[type]
-
-    debug 'embed overwrite', model.modelName, type, key
-
-    getInstance = (data) ->
-      new model data, 
-        applyDefaultValues: true 
-        applySetters: false
-        persisted: true 
-
-    model.find = (filter = {}, options = {}, cb) ->
-      if typeof filter is 'function'
-        cb = filter
-        filter = {}
-        options = {}
-
-      if typeof options is 'function'
-        cb = options
-        options = {}
-
-      filter ?= {}
-      filter.where ?= {}
-      filter.aggregate = Model.generateAggregateFilter key
-
-      hookState = {}
-
-      finish = (err, instances) ->
-        async.map instances, (instance, next) ->
-          context =
-            Model: model
-            instance: getInstance instance 
-            where: filter.where
-            hookState: hookState
-            options: options
-
-          model.notifyObserversOf 'loaded', context, (err, context) ->
-            next err, context.instance
-        , cb
-
-      Model.aggregate filter, (err, data) ->
-        if err or not filter?.include
-          return finish err, data
-
-        model.include data, filter.include, finish
-
-    model.findOne = (filter = {}, options = {}, cb) ->
-      if typeof filter is 'function'
-        cb = filter
-        filter = {}
-        options = {}
-
-      if typeof options is 'function'
-        cb = options
-        options = {}
-
-      filter ?= {}
-      filter.where ?= {}
-      filter.limit = 1
-      filter.aggregate = Model.generateAggregateFilter key
-
-      context =
-        Model: model
-        where: filter.where
-        hookState: {}
-        options: options
-
-      finish = (err, instance) ->
-        context.instance = getInstance instance?[0]
-
-        model.notifyObserversOf 'loaded', context, (err, context) ->
-          cb err, context.instance
-
-      Model.aggregate filter, (err, data) ->
-        if err or not filter?.include
-          return finish err, data
-
-        model.include data, filter.include, finish
-
-    model.findById = (id, filter = {}, options = {}, cb) ->
-      if typeof filter is 'function'
-        cb = filter
-        filter = {}
-        options = {}
-
-      if typeof options is 'function'
-        cb = options
-        options = {}
-
-      filter ?= {}
-      filter.where ?= {}
-      filter.where["#{ key }.id"] = ObjectID id
-      filter.limit = 1
-      filter.aggregate = Model.generateAggregateFilter key
-
-      context =
-        Model: model
-        where: filter.where
-        hookState: {}
-        options: options
-
-      finish = (err, instance) ->
-        context.instance = getInstance instance?[0]
-
-        model.notifyObserversOf 'loaded', context, (err, context) ->
-          cb err, context.instance
-
-      Model.aggregate filter, (err, data) ->
-        if err or not filter?.include
-          return finish err, data
-
-        model.include data, filter.include, finish
-
-    model.updateById = (id, data, options, cb) ->
-      if typeof options is 'function'
-        cb = options
-        options = {}
-
-      context =
-        Model: model
-        where: "#{ key }.id": ObjectID id 
-        data: data
-        hookState: {}
-        isNewInstance: false
-        options: options
-
-      model.notifyObserversAround 'save', context, ((context, done) =>
-        update = Model.parseUpdateData "#{ key }.$", context.data, '$set'
-        Model.update context.where, update, done
-      ), cb
-
-    model::patchAttributes = (data, options, cb) ->
-      if typeof options is 'function'
-        cb = options
-        options = {}
-
-      context =
-        Model: model
-        where: "#{ key }.id": ObjectID @id
-        data: data
-        hookState: {}
-        isNewInstance: false
-        options: options
-
-      finish = (err) =>
-        if err 
-          return cb err 
-
-        update = Model.parseUpdateData false, context.data, '$set'
-
-        query @, context.where, update
-
-        cb null, @
-
-        return 
-
-      model.notifyObserversAround 'save', context, ((context, done) =>
-        update = Model.parseUpdateData "#{ key }.$", context.data, '$set'
-        Model.update context.where, update, done
-      ), finish
-
-      return 
-
-    model::destroyById = (options, cb) ->
-      if typeof options is 'function'
-        cb = options
-        options = {}
-
-      context =
-        Model: model
-        where: "#{ key }.id": ObjectID @id
-        hookState: {}
-        options: options
-
-      $pull = "#{ key }": { id: ObjectID @id }
-
-      debug 'deleteById', { "#{ key }.id": ObjectID @id }, $pull
-
-      model.notifyObserversAround 'delete', context, ((context, done) =>
-        Model.update context.where, { $pull }, done
-      ), cb
-
-    model.create = (data, options, cb) ->
-      if typeof options is 'function'
-        cb = options
-        options = {}
-
-      orderProductId = ObjectID data.orderProductId
-      delete data.orderProductId
-
-      debug 'create', { id: orderProductId }, data
-
-      context =
-        Model: model
-        where: 
-          id: orderProductId
-        data: data
-        hookState: {}
-        isNewInstance: true
-        options: options
-
-      model.notifyObserversAround 'save', context, ((context, done) =>
-        update = Model.parseUpdateData "#{ key }.$", context.data, '$push'
-        Model.update context.where, update, (err) ->
-          done err, data
-      ), cb
-
-    model.deleteById = (id, options, cb) ->
-      if typeof options is 'function'
-        cb = options
-        options = {}
-
-      context =
-        Model: model
-        where: "#{ key }.id": ObjectID id 
-        hookState: {}
-        options: options
-
-      $pull = "#{ key }": { id: ObjectID id }
-
-      debug 'deleteById', { "#{ key }.id": ObjectID id }, $pull
-
-      model.notifyObserversAround 'delete', context, ((context, done) =>
-        Model.update context.where, { $pull }, done
-      ), cb
-
-  buildManyRoutes = (type, key, as) ->
+  buildManyRoutes = (type, key) ->
+    singular = singularize key
 
     get:
       isStatic: false
@@ -370,7 +139,7 @@ module.exports = (Model, options) ->
       ]
       http:
         verb: 'get'
-        path: "/#{ as }"
+        path: "/#{ singular }"
     findById:
       isStatic: false
       accepts: [
@@ -404,7 +173,7 @@ module.exports = (Model, options) ->
       ]
       http:
         verb: 'get'
-        path: "/#{ as }/:fk"
+        path: "/#{ singular }/:fk"
     updateById:
       isStatic: false
       accepts: [
@@ -439,7 +208,7 @@ module.exports = (Model, options) ->
       ]
       http:
         verb: 'put'
-        path: "/#{ as }/:fk"
+        path: "/#{ singular }/:fk"
     create:
       isStatic: false
       accepts: [
@@ -466,7 +235,7 @@ module.exports = (Model, options) ->
       ]
       http:
         verb: 'post'
-        path: "/#{ as }"
+        path: "/#{ singular }"
     deleteById:
       isStatic: false
       accepts: [
@@ -494,7 +263,7 @@ module.exports = (Model, options) ->
       ]
       http:
         verb: 'delete'
-        path: "/#{ as }/:fk"
+        path: "/#{ singular }/:fk"
     destroyAll:
       isStatic: false
       accepts: [
@@ -522,14 +291,8 @@ module.exports = (Model, options) ->
         verb: 'delete'
         path: "/#{ key }"
 
-  buildManyMethods = (type, key) ->
+  buildManyMethods = (type, key, as) ->
     model = Model.app.models[type]
-
-    getInstance = (data) ->
-      new model data, 
-        applyDefaultValues: true 
-        applySetters: false
-        persisted: true 
 
     get: (filter = {}, options = {}, cb) ->
       if typeof options is 'function'
@@ -537,7 +300,7 @@ module.exports = (Model, options) ->
         options = {}
 
       filter.where = filter.where or {}
-      filter.where.id = ObjectID @id
+      filter.where.id = @id
       filter.aggregate = Model.generateAggregateFilter key
 
       debug 'get', @, filter
@@ -545,9 +308,7 @@ module.exports = (Model, options) ->
       hookState = {}
 
       finish = (err, instances) ->
-        async.map instances, (data, next) ->
-          instance = getInstance data
-
+        async.map instances, (instance, next) ->
           context =
             Model: model
             instance: instance
@@ -561,7 +322,7 @@ module.exports = (Model, options) ->
 
       Model.aggregate filter, (err, data) ->
         if err or not filter?.include
-          return finish err, data 
+          return finish err, data
 
         model.include data, filter.include, finish
     findOne: (filter = {}, options, cb) ->
@@ -570,7 +331,7 @@ module.exports = (Model, options) ->
         options = {}
 
       filter.where = filter.where or {}
-      filter.where.id = ObjectID @id
+      filter.where.id = @id
       filter.limit = 1
       filter.aggregate = Model.generateAggregateFilter key
 
@@ -583,10 +344,10 @@ module.exports = (Model, options) ->
         options: options
 
       finish = (err, instance) ->
-        context.instance = getInstance instance?[0]  
+        context.instance = instance?[0]
 
         model.notifyObserversOf 'loaded', context, (err, context) ->
-          cb err, context.instance.toObject?(false, true, true) or context.instance
+          cb err, context.instance
 
       Model.aggregate filter, (err, data) ->
         if err or not filter?.include
@@ -604,8 +365,8 @@ module.exports = (Model, options) ->
         options = {}
 
       filter.where = filter.where or {}
-      filter.where["#{ key }.id"] = ObjectID id 
-      filter.where.id = ObjectID @id
+      filter.where["#{ key }.id"] = id
+      filter.where.id = @id
       filter.limit = 1
       filter.aggregate = Model.generateAggregateFilter key
 
@@ -618,12 +379,12 @@ module.exports = (Model, options) ->
         options: options
 
       finish = (err, instance) ->
-        context.instance = getInstance instance?[0] 
+        context.instance = instance?[0]
 
         model.notifyObserversOf 'loaded', context, (err, context) ->
-          cb err, context.instance.toObject?(false, true, true) or context.instance
+          cb err, context.instance
 
-      Model.aggregate filter, (err, data) -> 
+      Model.aggregate filter, (err, data) ->
         if err or not filter?.include
           return finish err, data
 
@@ -633,56 +394,147 @@ module.exports = (Model, options) ->
         cb = options
         options = {}
 
-      debug 'updateById', { "#{ key }.id": ObjectID id }, data
+      debug 'updateById', { "#{ key }.id": id }, data
 
       context =
         Model: model
-        where: { @id, "#{ key }.id": ObjectID id }
+        where: { @id, "#{ key }.id": id }
         data: data
         hookState: {}
         isNewInstance: false
         options: options
 
       model.notifyObserversAround 'save', context, ((context, done) =>
-        update = Model.parseUpdateData "#{ key }.$", context.data, '$set'
+        update = Model.parseUpdateData "#{ key }.$.", context.data, '$set'
         Model.update context.where, update, done
       ), cb
 
-    create: (data = {}, options = {}, cb) ->
-      if typeof options is 'function'
-        cb = options; options = {}
-
-      if typeof data is 'function'
-        data = {}; options = {}; cb = data 
-
-      debug 'create', { id: ObjectID @id }, data
-
-      context =
-        Model: model
-        where: { id: ObjectID @id }
-        data: data
-        hookState: {}
-        isNewInstance: true
-        options: options
-
-      model.notifyObserversAround 'save', context, ((context, done) =>
-        update = Model.parseUpdateData "#{ key }", data, '$push'
-
-        debug 'create.do', context.where, update
-
-        Model.update context.where, update, (err) ->
-          done err, data
-      ), cb
-    destroyById: (id, options, cb) ->
+    create: (data, options, cb) ->
       if typeof options is 'function'
         cb = options
         options = {}
 
-      update = Model.parseUpdateData "#{ key }", { id: ObjectID id }, '$pull'
+      ctor = @
+      where = { @id }
 
-      debug 'destroyById', { id: ObjectID @id }, update
+      if not ctor
+        return cb new HttpError 500
 
-      Model.update { id: ObjectID @id }, update, cb
+      { properties } = model.definition
+
+      propertyNames = Object.keys properties
+
+      propertyName = propertyNames.find (property) ->
+        not not properties[property].id
+
+      attr = properties[propertyName]
+      name = model.getIdName()
+
+      hookState = {}
+
+      single = false
+
+      if not Array.isArray data
+        single = true
+        data = [ data ]
+
+      build = (obj) ->
+        id = obj[name]
+
+        if typeof attr.type is 'function'
+          obj[name] = attr.type id
+
+        inst = new model obj
+        inst.parent = -> ctor
+
+        Model: model
+        where: where
+        instance: inst
+        hookState: hookState
+        isNewInstance: true
+        options: options
+
+      notify = (phase, next) ->
+        debug 'notify %s %s %o', key, phase, data
+
+        async.map data, (item, callback) ->
+          model.notifyObserversOf phase + ' save', build(item), (err, ctx = {}) ->
+            callback err, ctx.instance
+        , next
+
+      finish = (err) ->
+        if err
+          return cb err
+
+        notify 'after', (err, obj) ->
+          if err
+            return cb err
+
+          if single
+            [ obj ] = obj
+
+          cb null, obj
+
+      process = (err, arr) ->
+        if err
+          return cb err
+
+        update = Model.parseUpdateData "#{ key }", arr, '$push'
+
+        debug 'updating %s %o %o', key, where, update
+
+        Model.update where, update, finish
+
+      validate = (err, arr) ->
+        if err
+          return cb err
+
+        if not not props[as].options?.validate
+          return process null, arr.map (inst) ->
+            inst.toObject false
+
+        debug 'validating %s %o', key, arr
+
+        errors = undefined
+
+        async.forEachOf arr, (inst, idx, next) ->
+          inst.isValid (valid) ->
+            if not valid
+              id = inst[name]
+              first = Object.keys(inst.errors)[0]
+
+              if id
+                msg = 'contains invalid item: `' + id + '`'
+              else
+                msg = 'contains invalid item at index `' + idx + '`'
+
+              msg += ' (`' + first + '` ' + inst.errors[first] + ')'
+
+              ctor.errors ?= new Errors
+              ctor.errors.add key, msg, 'invalid'
+
+            arr[idx] = inst.toObject false
+
+            next()
+        , ->
+          if ctor.errors?
+            err = new ValidationError ctor
+
+          process err, arr
+
+      notify 'before', validate
+
+      return
+    deleteById: (id, options, cb) ->
+      if typeof options is 'function'
+        cb = options
+        options = {}
+
+      update = Model.parseUpdateData "#{ key }", { id }, '$pull'
+
+      debug 'deleteById', { @id }, update
+
+      Model.update { @id }, update, cb
     destroyAll: (filter = {}, options, cb) ->
       if typeof options is 'function'
         cb = options
@@ -691,19 +543,19 @@ module.exports = (Model, options) ->
       debug 'destroyAll', filter.where, { $unset: "#{ key }": '' }
 
       filter.where ?= {}
-      filter.where.id = ObjectID @id
+      filter.where.id = @id
 
       Model.update filter.where,
         { $unset: "#{ key }": '' }
       , cb
 
-  createEmbedManyModel = ({ relation, as }) ->
+  createEmbedManyModel = (relation) ->
     debug props, relation
 
     { model, property } = props[relation]
 
-    methods = buildManyMethods model, property
-    routes  = buildManyRoutes model, property, as
+    methods = buildManyMethods model, property, relation
+    routes  = buildManyRoutes model, property
 
     names = Object.keys methods
 
@@ -720,25 +572,12 @@ module.exports = (Model, options) ->
 
       Model.prototype[key] = fn
 
-      overWriteEmbedModelFunctions model, property
-
   Model.once 'attached', ->
 
     async.forEachOf Model.app.models, (name, model, next) ->
       model._runWhenAttachedToApp next
     , ->
       process.nextTick ->
-
-        keys = Object.keys(Model.relations).filter (relation) ->
-          not not Model.relations[relation].embed
-
-        relations = []
-        
-        for relation in keys 
-          relations.push
-            as: Model.relations[relation].keyFrom
-            relation: relation
-
         relations.forEach createEmbedManyModel
 
   return

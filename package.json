@@ -1,7 +1,7 @@
 {
   "name": "loopback-mixin-mongo-embed",
-  "version": "1.0.1",
-  "description": "Rewrites embbedded methods\/routes to use mongos $set, $unset, $push and $pull methods",
+  "version": "2.0.1",
+  "description": "Rewrites embbedded methods/routes to use mongos $set, $unset, $push and $pull methods",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -19,6 +19,9 @@
   "dependencies": {
     "async": "^2.6.0",
     "debug": "^3.1.0",
-    "mongodb": "^3.0.7"
+    "inflection": "^1.12.0",
+    "loopback-datasource-juggler": "^4.4.0",
+    "mongodb": "^3.0.7",
+    "standard-http-error": "^2.0.1"
   }
 }

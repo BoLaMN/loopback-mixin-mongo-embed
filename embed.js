@@ -1,53 +1,69 @@
-var async, debug, mongodb, query,
+var HttpError, ValidationError, async, debug, singularize,
   hasProp = {}.hasOwnProperty;
 
 debug = require('debug')('loopback:mixin:embed');
 
-query = require('./filter').query;
+HttpError = require('standard-http-error');
+
+singularize = require('inflection').singularize;
+
+ValidationError = require('loopback-datasource-juggler/lib/validations').ValidationError;
 
 async = require('async');
 
-mongodb = require('mongodb');
-
 module.exports = function(Model, options) {
-  var ObjectID, accepted, buildManyMethods, buildManyRoutes, createEmbedManyModel, overWriteEmbedModelFunctions, props;
-  props = Model.definition.settings.relations;
-  ObjectID = function(id) {
-    var e;
-    if (!id) {
-      return new mongodb.ObjectID();
+  var Errors, accepted, buildManyMethods, buildManyRoutes, createEmbedManyModel, props, relations;
+  relations = options.relations;
+  props = Model.settings.relations;
+  accepted = ['$currentDate', '$inc', '$max', '$min', '$mul', '$rename', '$setOnInsert', '$set', '$instance', '$unset', '$addToSet', '$pop', '$pullAll', '$pull', '$pushAll', '$push', '$each', '$bit'];
+  Errors = (function() {
+    function Errors() {
+      this.codes = {};
     }
-    if (id instanceof mongodb.ObjectID) {
-      return id;
-    }
-    if (typeof id !== 'string') {
-      return id;
-    }
-    try {
-      if (/^[0-9a-fA-F]{24}$/.test(id)) {
-        return new mongodb.ObjectID(id);
-      } else {
-        return id;
+
+    Errors.prototype.add = function(field, message, code) {
+      var base1;
+      if (code == null) {
+        code = 'invalid';
       }
-    } catch (error) {
-      e = error;
-      return id;
-    }
-  };
-  accepted = ['$currentDate', '$inc', '$max', '$min', '$mul', '$rename', '$setOnInsert', '$set', '$instance', '$unset', '$addToSet', '$pop', '$pullAll', '$pull', '$pushAll', '$push', '$bit'];
+      if (this[field] == null) {
+        this[field] = [];
+      }
+      this[field].push(message);
+      if ((base1 = this.codes)[field] == null) {
+        base1[field] = [];
+      }
+      return this.codes[field].push(code);
+    };
+
+    return Errors;
+
+  })();
   Model.parseUpdateData = function(base, data, operator) {
     var base1, i, key, len, obj, op, val;
     obj = {};
-    data = (typeof data.toObject === "function" ? data.toObject(false) : void 0) || data;
     for (i = 0, len = accepted.length; i < len; i++) {
       op = accepted[i];
       if (!data[op]) {
         continue;
       }
-      obj[op] = data[op];
+      if (op === '$push' && Array.isArray(data[op]) && data[op].length) {
+        obj[op] = {
+          $each: data[op]
+        };
+      } else {
+        obj[op] = data[op];
+      }
       delete data[op];
     }
-    if (Object.keys(data).length > 0) {
+    if (operator === '$push' && Array.isArray(data) && data.length) {
+      if (obj[operator] == null) {
+        obj[operator] = {};
+      }
+      obj[operator][base] = {
+        $each: data
+      };
+    } else if (Object.keys(data).length > 0) {
       if (obj[operator] == null) {
         obj[operator] = {};
       }
@@ -55,21 +71,13 @@ module.exports = function(Model, options) {
         if (!hasProp.call(data, key)) continue;
         val = data[key];
         if (val != null) {
-          if (operator === '$push' || operator === '$pull') {
-            if (base) {
-              if ((base1 = obj[operator])[base] == null) {
-                base1[base] = {};
-              }
-              obj[operator][base][key] = val;
-            } else {
-              obj[operator][key] = val;
+          if (operator === '$push' || operator === 'pull') {
+            if ((base1 = obj[operator])[base] == null) {
+              base1[base] = {};
             }
+            obj[operator][base][key] = val;
           } else {
-            if (base) {
-              obj[operator][base + '.' + key] = val;
-            } else {
-              obj[operator][key] = val;
-            }
+            obj[operator][base + key] = val;
           }
         }
       }
@@ -93,321 +101,9 @@ module.exports = function(Model, options) {
       ];
     };
   }
-  overWriteEmbedModelFunctions = function(type, key) {
-    var getInstance, model;
-    model = Model.app.models[type];
-    debug('embed overwrite', model.modelName, type, key);
-    getInstance = function(data) {
-      return new model(data, {
-        applyDefaultValues: true,
-        applySetters: false,
-        persisted: true
-      });
-    };
-    model.find = function(filter, options, cb) {
-      var finish, hookState;
-      if (filter == null) {
-        filter = {};
-      }
-      if (options == null) {
-        options = {};
-      }
-      if (typeof filter === 'function') {
-        cb = filter;
-        filter = {};
-        options = {};
-      }
-      if (typeof options === 'function') {
-        cb = options;
-        options = {};
-      }
-      if (filter == null) {
-        filter = {};
-      }
-      if (filter.where == null) {
-        filter.where = {};
-      }
-      filter.aggregate = Model.generateAggregateFilter(key);
-      hookState = {};
-      finish = function(err, instances) {
-        return async.map(instances, function(instance, next) {
-          var context;
-          context = {
-            Model: model,
-            instance: getInstance(instance),
-            where: filter.where,
-            hookState: hookState,
-            options: options
-          };
-          return model.notifyObserversOf('loaded', context, function(err, context) {
-            return next(err, context.instance);
-          });
-        }, cb);
-      };
-      return Model.aggregate(filter, function(err, data) {
-        if (err || !(filter != null ? filter.include : void 0)) {
-          return finish(err, data);
-        }
-        return model.include(data, filter.include, finish);
-      });
-    };
-    model.findOne = function(filter, options, cb) {
-      var context, finish;
-      if (filter == null) {
-        filter = {};
-      }
-      if (options == null) {
-        options = {};
-      }
-      if (typeof filter === 'function') {
-        cb = filter;
-        filter = {};
-        options = {};
-      }
-      if (typeof options === 'function') {
-        cb = options;
-        options = {};
-      }
-      if (filter == null) {
-        filter = {};
-      }
-      if (filter.where == null) {
-        filter.where = {};
-      }
-      filter.limit = 1;
-      filter.aggregate = Model.generateAggregateFilter(key);
-      context = {
-        Model: model,
-        where: filter.where,
-        hookState: {},
-        options: options
-      };
-      finish = function(err, instance) {
-        context.instance = getInstance(instance != null ? instance[0] : void 0);
-        return model.notifyObserversOf('loaded', context, function(err, context) {
-          return cb(err, context.instance);
-        });
-      };
-      return Model.aggregate(filter, function(err, data) {
-        if (err || !(filter != null ? filter.include : void 0)) {
-          return finish(err, data);
-        }
-        return model.include(data, filter.include, finish);
-      });
-    };
-    model.findById = function(id, filter, options, cb) {
-      var context, finish;
-      if (filter == null) {
-        filter = {};
-      }
-      if (options == null) {
-        options = {};
-      }
-      if (typeof filter === 'function') {
-        cb = filter;
-        filter = {};
-        options = {};
-      }
-      if (typeof options === 'function') {
-        cb = options;
-        options = {};
-      }
-      if (filter == null) {
-        filter = {};
-      }
-      if (filter.where == null) {
-        filter.where = {};
-      }
-      filter.where[key + ".id"] = ObjectID(id);
-      filter.limit = 1;
-      filter.aggregate = Model.generateAggregateFilter(key);
-      context = {
-        Model: model,
-        where: filter.where,
-        hookState: {},
-        options: options
-      };
-      finish = function(err, instance) {
-        context.instance = getInstance(instance != null ? instance[0] : void 0);
-        return model.notifyObserversOf('loaded', context, function(err, context) {
-          return cb(err, context.instance);
-        });
-      };
-      return Model.aggregate(filter, function(err, data) {
-        if (err || !(filter != null ? filter.include : void 0)) {
-          return finish(err, data);
-        }
-        return model.include(data, filter.include, finish);
-      });
-    };
-    model.updateById = function(id, data, options, cb) {
-      var context, obj1;
-      if (typeof options === 'function') {
-        cb = options;
-        options = {};
-      }
-      context = {
-        Model: model,
-        where: (
-          obj1 = {},
-          obj1[key + ".id"] = ObjectID(id),
-          obj1
-        ),
-        data: data,
-        hookState: {},
-        isNewInstance: false,
-        options: options
-      };
-      return model.notifyObserversAround('save', context, ((function(_this) {
-        return function(context, done) {
-          var update;
-          update = Model.parseUpdateData(key + ".$", context.data, '$set');
-          return Model.update(context.where, update, done);
-        };
-      })(this)), cb);
-    };
-    model.prototype.patchAttributes = function(data, options, cb) {
-      var context, finish, obj1;
-      if (typeof options === 'function') {
-        cb = options;
-        options = {};
-      }
-      context = {
-        Model: model,
-        where: (
-          obj1 = {},
-          obj1[key + ".id"] = ObjectID(this.id),
-          obj1
-        ),
-        data: data,
-        hookState: {},
-        isNewInstance: false,
-        options: options
-      };
-      finish = (function(_this) {
-        return function(err) {
-          var update;
-          if (err) {
-            return cb(err);
-          }
-          update = Model.parseUpdateData(false, context.data, '$set');
-          query(_this, context.where, update);
-          cb(null, _this);
-        };
-      })(this);
-      model.notifyObserversAround('save', context, ((function(_this) {
-        return function(context, done) {
-          var update;
-          update = Model.parseUpdateData(key + ".$", context.data, '$set');
-          return Model.update(context.where, update, done);
-        };
-      })(this)), finish);
-    };
-    model.prototype.destroyById = function(options, cb) {
-      var $pull, context, obj1, obj2, obj3;
-      if (typeof options === 'function') {
-        cb = options;
-        options = {};
-      }
-      context = {
-        Model: model,
-        where: (
-          obj1 = {},
-          obj1[key + ".id"] = ObjectID(this.id),
-          obj1
-        ),
-        hookState: {},
-        options: options
-      };
-      $pull = (
-        obj2 = {},
-        obj2["" + key] = {
-          id: ObjectID(this.id)
-        },
-        obj2
-      );
-      debug('deleteById', (
-        obj3 = {},
-        obj3[key + ".id"] = ObjectID(this.id),
-        obj3
-      ), $pull);
-      return model.notifyObserversAround('delete', context, ((function(_this) {
-        return function(context, done) {
-          return Model.update(context.where, {
-            $pull: $pull
-          }, done);
-        };
-      })(this)), cb);
-    };
-    model.create = function(data, options, cb) {
-      var context, orderProductId;
-      if (typeof options === 'function') {
-        cb = options;
-        options = {};
-      }
-      orderProductId = ObjectID(data.orderProductId);
-      delete data.orderProductId;
-      debug('create', {
-        id: orderProductId
-      }, data);
-      context = {
-        Model: model,
-        where: {
-          id: orderProductId
-        },
-        data: data,
-        hookState: {},
-        isNewInstance: true,
-        options: options
-      };
-      return model.notifyObserversAround('save', context, ((function(_this) {
-        return function(context, done) {
-          var update;
-          update = Model.parseUpdateData(key + ".$", context.data, '$push');
-          return Model.update(context.where, update, function(err) {
-            return done(err, data);
-          });
-        };
-      })(this)), cb);
-    };
-    return model.deleteById = function(id, options, cb) {
-      var $pull, context, obj1, obj2, obj3;
-      if (typeof options === 'function') {
-        cb = options;
-        options = {};
-      }
-      context = {
-        Model: model,
-        where: (
-          obj1 = {},
-          obj1[key + ".id"] = ObjectID(id),
-          obj1
-        ),
-        hookState: {},
-        options: options
-      };
-      $pull = (
-        obj2 = {},
-        obj2["" + key] = {
-          id: ObjectID(id)
-        },
-        obj2
-      );
-      debug('deleteById', (
-        obj3 = {},
-        obj3[key + ".id"] = ObjectID(id),
-        obj3
-      ), $pull);
-      return model.notifyObserversAround('delete', context, ((function(_this) {
-        return function(context, done) {
-          return Model.update(context.where, {
-            $pull: $pull
-          }, done);
-        };
-      })(this)), cb);
-    };
-  };
-  buildManyRoutes = function(type, key, as) {
+  buildManyRoutes = function(type, key) {
+    var singular;
+    singular = singularize(key);
     return {
       get: {
         isStatic: false,
@@ -460,7 +156,7 @@ module.exports = function(Model, options) {
         ],
         http: {
           verb: 'get',
-          path: "/" + as
+          path: "/" + singular
         }
       },
       findById: {
@@ -495,7 +191,7 @@ module.exports = function(Model, options) {
         ],
         http: {
           verb: 'get',
-          path: "/" + as + "/:fk"
+          path: "/" + singular + "/:fk"
         }
       },
       updateById: {
@@ -532,7 +228,7 @@ module.exports = function(Model, options) {
         ],
         http: {
           verb: 'put',
-          path: "/" + as + "/:fk"
+          path: "/" + singular + "/:fk"
         }
       },
       create: {
@@ -561,7 +257,7 @@ module.exports = function(Model, options) {
         ],
         http: {
           verb: 'post',
-          path: "/" + as
+          path: "/" + singular
         }
       },
       deleteById: {
@@ -591,7 +287,7 @@ module.exports = function(Model, options) {
         ],
         http: {
           verb: 'delete',
-          path: "/" + as + "/:fk"
+          path: "/" + singular + "/:fk"
         }
       },
       destroyAll: {
@@ -623,16 +319,9 @@ module.exports = function(Model, options) {
       }
     };
   };
-  buildManyMethods = function(type, key) {
-    var getInstance, model;
+  buildManyMethods = function(type, key, as) {
+    var model;
     model = Model.app.models[type];
-    getInstance = function(data) {
-      return new model(data, {
-        applyDefaultValues: true,
-        applySetters: false,
-        persisted: true
-      });
-    };
     return {
       get: function(filter, options, cb) {
         var finish, hookState;
@@ -647,14 +336,13 @@ module.exports = function(Model, options) {
           options = {};
         }
         filter.where = filter.where || {};
-        filter.where.id = ObjectID(this.id);
+        filter.where.id = this.id;
         filter.aggregate = Model.generateAggregateFilter(key);
         debug('get', this, filter);
         hookState = {};
         finish = function(err, instances) {
-          return async.map(instances, function(data, next) {
-            var context, instance;
-            instance = getInstance(data);
+          return async.map(instances, function(instance, next) {
+            var context;
             context = {
               Model: model,
               instance: instance,
@@ -684,7 +372,7 @@ module.exports = function(Model, options) {
           options = {};
         }
         filter.where = filter.where || {};
-        filter.where.id = ObjectID(this.id);
+        filter.where.id = this.id;
         filter.limit = 1;
         filter.aggregate = Model.generateAggregateFilter(key);
         debug('findOne', this, filter);
@@ -695,10 +383,9 @@ module.exports = function(Model, options) {
           options: options
         };
         finish = function(err, instance) {
-          context.instance = getInstance(instance != null ? instance[0] : void 0);
+          context.instance = instance != null ? instance[0] : void 0;
           return model.notifyObserversOf('loaded', context, function(err, context) {
-            var base1;
-            return cb(err, (typeof (base1 = context.instance).toObject === "function" ? base1.toObject(false, true, true) : void 0) || context.instance);
+            return cb(err, context.instance);
           });
         };
         return Model.aggregate(filter, function(err, data) {
@@ -726,8 +413,8 @@ module.exports = function(Model, options) {
           options = {};
         }
         filter.where = filter.where || {};
-        filter.where[key + ".id"] = ObjectID(id);
-        filter.where.id = ObjectID(this.id);
+        filter.where[key + ".id"] = id;
+        filter.where.id = this.id;
         filter.limit = 1;
         filter.aggregate = Model.generateAggregateFilter(key);
         debug('findById', this, filter);
@@ -738,10 +425,9 @@ module.exports = function(Model, options) {
           options: options
         };
         finish = function(err, instance) {
-          context.instance = getInstance(instance != null ? instance[0] : void 0);
+          context.instance = instance != null ? instance[0] : void 0;
           return model.notifyObserversOf('loaded', context, function(err, context) {
-            var base1;
-            return cb(err, (typeof (base1 = context.instance).toObject === "function" ? base1.toObject(false, true, true) : void 0) || context.instance);
+            return cb(err, context.instance);
           });
         };
         return Model.aggregate(filter, function(err, data) {
@@ -759,7 +445,7 @@ module.exports = function(Model, options) {
         }
         debug('updateById', (
           obj1 = {},
-          obj1[key + ".id"] = ObjectID(id),
+          obj1[key + ".id"] = id,
           obj1
         ), data);
         context = {
@@ -768,7 +454,7 @@ module.exports = function(Model, options) {
             obj2 = {
               id: this.id
             },
-            obj2[key + ".id"] = ObjectID(id),
+            obj2[key + ".id"] = id,
             obj2
           ),
           data: data,
@@ -779,66 +465,145 @@ module.exports = function(Model, options) {
         return model.notifyObserversAround('save', context, ((function(_this) {
           return function(context, done) {
             var update;
-            update = Model.parseUpdateData(key + ".$", context.data, '$set');
+            update = Model.parseUpdateData(key + ".$.", context.data, '$set');
             return Model.update(context.where, update, done);
           };
         })(this)), cb);
       },
       create: function(data, options, cb) {
-        var context;
-        if (data == null) {
-          data = {};
-        }
-        if (options == null) {
-          options = {};
-        }
+        var attr, build, ctor, finish, hookState, name, notify, process, properties, propertyName, propertyNames, single, validate, where;
         if (typeof options === 'function') {
           cb = options;
           options = {};
         }
-        if (typeof data === 'function') {
-          data = {};
-          options = {};
-          cb = data;
-        }
-        debug('create', {
-          id: ObjectID(this.id)
-        }, data);
-        context = {
-          Model: model,
-          where: {
-            id: ObjectID(this.id)
-          },
-          data: data,
-          hookState: {},
-          isNewInstance: true,
-          options: options
+        ctor = this;
+        where = {
+          id: this.id
         };
-        return model.notifyObserversAround('save', context, ((function(_this) {
-          return function(context, done) {
-            var update;
-            update = Model.parseUpdateData("" + key, data, '$push');
-            debug('create.do', context.where, update);
-            return Model.update(context.where, update, function(err) {
-              return done(err, data);
-            });
+        if (!ctor) {
+          return cb(new HttpError(500));
+        }
+        properties = model.definition.properties;
+        propertyNames = Object.keys(properties);
+        propertyName = propertyNames.find(function(property) {
+          return !!properties[property].id;
+        });
+        attr = properties[propertyName];
+        name = model.getIdName();
+        hookState = {};
+        single = false;
+        if (!Array.isArray(data)) {
+          single = true;
+          data = [data];
+        }
+        build = function(obj) {
+          var id, inst;
+          id = obj[name];
+          if (typeof attr.type === 'function') {
+            obj[name] = attr.type(id);
+          }
+          inst = new model(obj);
+          inst.parent = function() {
+            return ctor;
           };
-        })(this)), cb);
+          return {
+            Model: model,
+            where: where,
+            instance: inst,
+            hookState: hookState,
+            isNewInstance: true,
+            options: options
+          };
+        };
+        notify = function(phase, next) {
+          debug('notify %s %s %o', key, phase, data);
+          return async.map(data, function(item, callback) {
+            return model.notifyObserversOf(phase + ' save', build(item), function(err, ctx) {
+              if (ctx == null) {
+                ctx = {};
+              }
+              return callback(err, ctx.instance);
+            });
+          }, next);
+        };
+        finish = function(err) {
+          if (err) {
+            return cb(err);
+          }
+          return notify('after', function(err, obj) {
+            if (err) {
+              return cb(err);
+            }
+            if (single) {
+              obj = obj[0];
+            }
+            return cb(null, obj);
+          });
+        };
+        process = function(err, arr) {
+          var update;
+          if (err) {
+            return cb(err);
+          }
+          update = Model.parseUpdateData("" + key, arr, '$push');
+          debug('updating %s %o %o', key, where, update);
+          return Model.update(where, update, finish);
+        };
+        validate = function(err, arr) {
+          var errors, ref;
+          if (err) {
+            return cb(err);
+          }
+          if (!!((ref = props[as].options) != null ? ref.validate : void 0)) {
+            return process(null, arr.map(function(inst) {
+              return inst.toObject(false);
+            }));
+          }
+          debug('validating %s %o', key, arr);
+          errors = void 0;
+          return async.forEachOf(arr, function(inst, idx, next) {
+            return inst.isValid(function(valid) {
+              var first, id, msg;
+              if (!valid) {
+                id = inst[name];
+                first = Object.keys(inst.errors)[0];
+                if (id) {
+                  msg = 'contains invalid item: `' + id + '`';
+                } else {
+                  msg = 'contains invalid item at index `' + idx + '`';
+                }
+                msg += ' (`' + first + '` ' + inst.errors[first] + ')';
+                if (ctor.errors == null) {
+                  ctor.errors = new Errors;
+                }
+                ctor.errors.add(key, msg, 'invalid');
+              }
+              arr[idx] = inst.toObject(false);
+              return next();
+            });
+          }, function() {
+            if (ctor.errors != null) {
+              err = new ValidationError(ctor);
+            }
+            return process(err, arr);
+          });
+        };
+        notify('before', validate);
       },
-      destroyById: function(id, options, cb) {
+      deleteById: function(id, options, cb) {
         var update;
         if (typeof options === 'function') {
           cb = options;
           options = {};
         }
         update = Model.parseUpdateData("" + key, {
-          id: ObjectID(id)
+          id: id
         }, '$pull');
-        debug('destroyById', {
-          id: ObjectID(this.id)
+        debug('deleteById', {
+          id: this.id
         }, update);
         return Model.update({
-          id: ObjectID(this.id)
+          id: this.id
         }, update, cb);
       },
       destroyAll: function(filter, options, cb) {
@@ -860,7 +625,7 @@ module.exports = function(Model, options) {
         if (filter.where == null) {
           filter.where = {};
         }
-        filter.where.id = ObjectID(this.id);
+        filter.where.id = this.id;
         return Model.update(filter.where, {
           $unset: (
             obj2 = {},
@@ -871,13 +636,12 @@ module.exports = function(Model, options) {
       }
     };
   };
-  createEmbedManyModel = function(arg) {
-    var as, methods, model, names, property, ref, relation, routes;
-    relation = arg.relation, as = arg.as;
+  createEmbedManyModel = function(relation) {
+    var methods, model, names, property, ref, routes;
     debug(props, relation);
     ref = props[relation], model = ref.model, property = ref.property;
-    methods = buildManyMethods(model, property);
-    routes = buildManyRoutes(model, property, as);
+    methods = buildManyMethods(model, property, relation);
+    routes = buildManyRoutes(model, property);
     names = Object.keys(methods);
     return names.forEach(function(method) {
       var fn, key, route;
@@ -888,8 +652,7 @@ module.exports = function(Model, options) {
         return define(key, route, fn);
       });
       debug('overwriting', key);
-      Model.prototype[key] = fn;
-      return overWriteEmbedModelFunctions(model, property);
+      return Model.prototype[key] = fn;
     });
   };
   Model.once('attached', function() {
@@ -897,18 +660,6 @@ module.exports = function(Model, options) {
       return model._runWhenAttachedToApp(next);
     }, function() {
       return process.nextTick(function() {
-        var i, keys, len, relation, relations;
-        keys = Object.keys(Model.relations).filter(function(relation) {
-          return !!Model.relations[relation].embed;
-        });
-        relations = [];
-        for (i = 0, len = keys.length; i < len; i++) {
-          relation = keys[i];
-          relations.push({
-            as: Model.relations[relation].keyFrom,
-            relation: relation
-          });
-        }
         return relations.forEach(createEmbedManyModel);
       });
     });
