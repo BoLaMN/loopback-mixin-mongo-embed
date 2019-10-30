@@ -483,7 +483,19 @@ module.exports = (Model, options) ->
 
         debug 'updating %s %o %o', key, where, update
 
-        Model.update where, update, finish
+        obj =
+          Model: model
+          where: where
+          data: update
+          hookState: hookState
+          isNewInstance: true
+          options: options
+
+        model.notifyObserversOf 'persist', obj, (err, ctx = {}) ->
+          if err
+            return cb err
+
+          Model.update ctx.where, ctx.data, finish
 
       validate = (err, arr) ->
         if err
